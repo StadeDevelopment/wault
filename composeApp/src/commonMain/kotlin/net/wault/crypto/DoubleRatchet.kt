@@ -1,0 +1,318 @@
+package net.wault.crypto
+
+class DoubleRatchet(
+    private val crypto: CryptoApi,
+    private val pq: PqCrypto
+) {
+
+    data class State(
+        var rootKey: ByteArray,
+        var sendChainKey: ByteArray?,
+        var recvChainKey: ByteArray?,
+        var dhSendPriv: ByteArray,
+        var dhSendPub: ByteArray,
+        var dhRecvPub: ByteArray?,
+        var mlkemSendPriv: ByteArray,
+        var mlkemSendPub: ByteArray,
+        var mlkemRecvPub: ByteArray?,
+        var pendingKemCiphertext: ByteArray?,
+        var sendCounter: Int,
+        var recvCounter: Int,
+        var previousSendCounter: Int,
+        val skipped: MutableMap<SkippedKey, ByteArray>
+    )
+
+    data class SkippedKey(val dhPub: List<Byte>, val counter: Int)
+
+    data class Header(
+        val dhPub: ByteArray,
+        val previousCounter: Int,
+        val counter: Int,
+        val mlkemPub: ByteArray? = null,
+        val mlkemCt: ByteArray? = null
+    ) {
+        fun encode(): ByteArray {
+            val flags = (if (mlkemPub != null) 1 else 0) or (if (mlkemCt != null) 2 else 0)
+            val baseSize = 2 + 1 + 4 + 4 + dhPub.size
+            val total = baseSize + (mlkemPub?.size ?: 0) + (mlkemCt?.size ?: 0)
+            val out = ByteArray(total)
+            out[0] = 0x00; out[1] = 0x01
+            out[2] = (flags and 0xff).toByte()
+            writeInt(out, 3, previousCounter)
+            writeInt(out, 7, counter)
+            dhPub.copyInto(out, 11)
+            var off = 11 + dhPub.size
+            mlkemPub?.let { it.copyInto(out, off); off += it.size }
+            mlkemCt?.let { it.copyInto(out, off); off += it.size }
+            return out
+        }
+
+        companion object {
+            fun decode(bytes: ByteArray, dhPubSize: Int = 32): Header? {
+                if (bytes.size < 2 + 1 + 4 + 4 + dhPubSize) return null
+                if (bytes[0] != 0x00.toByte() || bytes[1] != 0x01.toByte()) return null
+                val flags = bytes[2].toInt() and 0xff
+                val prev = readInt(bytes, 3)
+                val ctr = readInt(bytes, 7)
+                val pub = bytes.copyOfRange(11, 11 + dhPubSize)
+                var off = 11 + dhPubSize
+                val kemPub = if ((flags and 1) != 0) {
+                    if (off + MLKEM_PUB_LEN > bytes.size) return null
+                    bytes.copyOfRange(off, off + MLKEM_PUB_LEN).also { off += MLKEM_PUB_LEN }
+                } else null
+                val kemCt = if ((flags and 2) != 0) {
+                    if (off + MLKEM_CT_LEN > bytes.size) return null
+                    bytes.copyOfRange(off, off + MLKEM_CT_LEN).also { off += MLKEM_CT_LEN }
+                } else null
+                return Header(pub, prev, ctr, kemPub, kemCt)
+            }
+        }
+    }
+
+    fun initSymmetric(
+        rootSeed: ByteArray,
+        ownDh: KeyPair,
+        peerDhPub: ByteArray,
+        isAlice: Boolean,
+        ownKem: KeyPair? = null,
+        peerKemPub: ByteArray? = null
+    ): State {
+        val a2b = crypto.hkdf(rootSeed, ByteArray(0), "wault-dr-a2b".encodeToByteArray(), 32)
+        val b2a = crypto.hkdf(rootSeed, ByteArray(0), "wault-dr-b2a".encodeToByteArray(), 32)
+        val state = State(
+            rootKey = rootSeed.copyOf(),
+            sendChainKey = if (isAlice) a2b else b2a,
+            recvChainKey = if (isAlice) b2a else a2b,
+            dhSendPriv = ownDh.privateKey,
+            dhSendPub = ownDh.publicKey,
+            dhRecvPub = peerDhPub,
+            mlkemSendPriv = ownKem?.privateKey ?: ByteArray(0),
+            mlkemSendPub = ownKem?.publicKey ?: ByteArray(0),
+            mlkemRecvPub = peerKemPub,
+            pendingKemCiphertext = null,
+            sendCounter = 0,
+            recvCounter = 0,
+            previousSendCounter = 0,
+            skipped = mutableMapOf()
+        )
+        if (isAlice) startSendRatchet(state)
+        return state
+    }
+
+    fun hasNeverRatcheted(state: State, staticHandshakePub: ByteArray): Boolean =
+        state.dhSendPub.contentEquals(staticHandshakePub)
+
+    fun startSendRatchet(state: State) {
+        val peerDhPub = state.dhRecvPub ?: return
+        state.previousSendCounter = state.sendCounter
+        state.sendCounter = 0
+        sendStep(state, peerDhPub)
+    }
+
+    fun encrypt(state: State, plaintext: ByteArray, associatedData: ByteArray = ByteArray(0)): ByteArray {
+        val chain = state.sendChainKey ?: error("send chain not initialized")
+        val (newChain, messageKey) = kdfChain(chain)
+        state.sendChainKey = newChain
+        val headerKemPub = state.mlkemSendPub.takeIf { it.isNotEmpty() }
+        val headerKemCt = state.pendingKemCiphertext
+        val header = Header(
+            dhPub = state.dhSendPub,
+            previousCounter = state.previousSendCounter,
+            counter = state.sendCounter,
+            mlkemPub = headerKemPub,
+            mlkemCt = headerKemCt
+        )
+        state.sendCounter += 1
+        val nonce = crypto.hkdf(messageKey, ByteArray(0), NONCE_INFO, 12)
+        val key = crypto.hkdf(messageKey, ByteArray(0), KEY_INFO, 32)
+        val headerBytes = header.encode()
+        val ad = associatedData + headerBytes
+        val ct = crypto.aeadSeal(key, nonce, plaintext, ad)
+        val out = ByteArray(4 + headerBytes.size + ct.size)
+        writeInt(out, 0, headerBytes.size)
+        headerBytes.copyInto(out, 4)
+        ct.copyInto(out, 4 + headerBytes.size)
+        return out
+    }
+
+    fun decrypt(state: State, frame: ByteArray, associatedData: ByteArray = ByteArray(0)): ByteArray? {
+        if (frame.size < 4) return null
+        val headerLen = readInt(frame, 0)
+        if (headerLen < 11 + 32 || frame.size < 4 + headerLen) return null
+        val headerBytes = frame.copyOfRange(4, 4 + headerLen)
+        val ct = frame.copyOfRange(4 + headerLen, frame.size)
+        val header = Header.decode(headerBytes) ?: return null
+        val ad = associatedData + headerBytes
+
+        val skippedKey = SkippedKey(header.dhPub.toList(), header.counter)
+        state.skipped.remove(skippedKey)?.let { mk ->
+            val out = openWith(mk, ct, ad)
+            if (out == null) state.skipped[skippedKey] = mk
+            return out
+        }
+
+        if (header.dhPub.contentEquals(state.dhSendPub)) return null
+        if (state.dhRecvPub != null && header.dhPub.contentEquals(state.dhRecvPub!!) &&
+            header.counter < state.recvCounter
+        ) return null
+
+        val incomingKemSs = if (header.mlkemCt == null) {
+            ByteArray(0)
+        } else {
+            if (state.mlkemSendPriv.isEmpty()) return null
+            runCatching { pq.mlkemDecapsulate(state.mlkemSendPriv, header.mlkemCt) }.getOrNull()
+                ?: return null
+        }
+
+        val snapshot = snapshotState(state)
+
+        if (state.dhRecvPub == null || !header.dhPub.contentEquals(state.dhRecvPub!!)) {
+            skipMessageKeys(state, header.previousCounter)
+            dhRatchet(state, header, incomingKemSs)
+        }
+
+        skipMessageKeys(state, header.counter)
+        val chain = state.recvChainKey ?: run { restoreState(state, snapshot); return null }
+        val (newChain, messageKey) = kdfChain(chain)
+        state.recvChainKey = newChain
+        state.recvCounter += 1
+        val plain = openWith(messageKey, ct, ad)
+        if (plain == null) {
+            restoreState(state, snapshot)
+            return null
+        }
+        return plain
+    }
+
+    private fun snapshotState(s: State): State = State(
+        rootKey = s.rootKey.copyOf(),
+        sendChainKey = s.sendChainKey?.copyOf(),
+        recvChainKey = s.recvChainKey?.copyOf(),
+        dhSendPriv = s.dhSendPriv.copyOf(),
+        dhSendPub = s.dhSendPub.copyOf(),
+        dhRecvPub = s.dhRecvPub?.copyOf(),
+        mlkemSendPriv = s.mlkemSendPriv.copyOf(),
+        mlkemSendPub = s.mlkemSendPub.copyOf(),
+        mlkemRecvPub = s.mlkemRecvPub?.copyOf(),
+        pendingKemCiphertext = s.pendingKemCiphertext?.copyOf(),
+        sendCounter = s.sendCounter,
+        recvCounter = s.recvCounter,
+        previousSendCounter = s.previousSendCounter,
+        skipped = LinkedHashMap(s.skipped)
+    )
+
+    private fun restoreState(s: State, snap: State) {
+        s.rootKey = snap.rootKey
+        s.sendChainKey = snap.sendChainKey
+        s.recvChainKey = snap.recvChainKey
+        s.dhSendPriv = snap.dhSendPriv
+        s.dhSendPub = snap.dhSendPub
+        s.dhRecvPub = snap.dhRecvPub
+        s.mlkemSendPriv = snap.mlkemSendPriv
+        s.mlkemSendPub = snap.mlkemSendPub
+        s.mlkemRecvPub = snap.mlkemRecvPub
+        s.pendingKemCiphertext = snap.pendingKemCiphertext
+        s.sendCounter = snap.sendCounter
+        s.recvCounter = snap.recvCounter
+        s.previousSendCounter = snap.previousSendCounter
+        s.skipped.clear()
+        s.skipped.putAll(snap.skipped)
+    }
+
+    private fun openWith(messageKey: ByteArray, ct: ByteArray, ad: ByteArray): ByteArray? {
+        val nonce = crypto.hkdf(messageKey, ByteArray(0), NONCE_INFO, 12)
+        val key = crypto.hkdf(messageKey, ByteArray(0), KEY_INFO, 32)
+        return crypto.aeadOpen(key, nonce, ct, ad)
+    }
+
+    private fun skipMessageKeys(state: State, until: Int) {
+        val chain = state.recvChainKey ?: return
+        val recvPub = state.dhRecvPub ?: return
+        var localChain = chain
+        var counter = state.recvCounter
+        val limit = until.coerceAtMost(counter + MAX_SKIP_PER_STEP)
+        while (counter < limit) {
+            val (next, mk) = kdfChain(localChain)
+            state.skipped[SkippedKey(recvPub.toList(), counter)] = mk
+            localChain = next
+            counter += 1
+        }
+        state.recvChainKey = localChain
+        state.recvCounter = counter
+        while (state.skipped.size > MAX_SKIPPED_STORED) {
+            val oldest = state.skipped.keys.firstOrNull() ?: break
+            state.skipped.remove(oldest)
+        }
+    }
+
+    private fun dhRatchet(state: State, header: Header, incomingKemSs: ByteArray) {
+        state.previousSendCounter = state.sendCounter
+        state.sendCounter = 0
+        state.recvCounter = 0
+        state.dhRecvPub = header.dhPub
+        header.mlkemPub?.let { state.mlkemRecvPub = it }
+
+        val sharedRecv = crypto.keyAgreement(state.dhSendPriv, header.dhPub)
+        val derivedRecv = crypto.hkdf(sharedRecv + incomingKemSs, state.rootKey, STEP_INFO, 64)
+        state.rootKey = derivedRecv.copyOfRange(0, 32)
+        state.recvChainKey = derivedRecv.copyOfRange(32, 64)
+
+        sendStep(state, header.dhPub)
+    }
+
+    private fun sendStep(state: State, peerDhPub: ByteArray) {
+        val newDh = crypto.generateAgreementKeyPair()
+        state.dhSendPriv = newDh.privateKey
+        state.dhSendPub = newDh.publicKey
+
+        val newKem = pq.generateMlKemKeyPair()
+        state.mlkemSendPriv = newKem.privateKey
+        state.mlkemSendPub = newKem.publicKey
+
+        var kemSs = ByteArray(0)
+        state.pendingKemCiphertext = null
+        val peerKemPub = state.mlkemRecvPub
+        if (peerKemPub != null) {
+            val enc = runCatching { pq.mlkemEncapsulate(peerKemPub) }.getOrNull()
+            if (enc != null) {
+                kemSs = enc.sharedSecret
+                state.pendingKemCiphertext = enc.ciphertext
+            }
+        }
+
+        val sharedSend = crypto.keyAgreement(state.dhSendPriv, peerDhPub)
+        val derivedSend = crypto.hkdf(sharedSend + kemSs, state.rootKey, STEP_INFO, 64)
+        state.rootKey = derivedSend.copyOfRange(0, 32)
+        state.sendChainKey = derivedSend.copyOfRange(32, 64)
+    }
+
+    private fun kdfChain(chainKey: ByteArray): Pair<ByteArray, ByteArray> {
+        val out = crypto.hkdf(chainKey, ByteArray(0), CHAIN_INFO, 64)
+        return out.copyOfRange(0, 32) to out.copyOfRange(32, 64)
+    }
+
+    companion object {
+        const val MLKEM_PUB_LEN = 1184
+        const val MLKEM_CT_LEN = 1088
+
+        private const val MAX_SKIP_PER_STEP = 1000
+        private const val MAX_SKIPPED_STORED = 2000
+        private val STEP_INFO = "wault-pqdr-step-v1".encodeToByteArray()
+        private val CHAIN_INFO = "wault-dr-chain".encodeToByteArray()
+        private val NONCE_INFO = "wault-dr-nonce".encodeToByteArray()
+        private val KEY_INFO = "wault-dr-key".encodeToByteArray()
+
+        private fun writeInt(out: ByteArray, offset: Int, value: Int) {
+            out[offset] = ((value ushr 24) and 0xff).toByte()
+            out[offset + 1] = ((value ushr 16) and 0xff).toByte()
+            out[offset + 2] = ((value ushr 8) and 0xff).toByte()
+            out[offset + 3] = (value and 0xff).toByte()
+        }
+
+        private fun readInt(src: ByteArray, offset: Int): Int =
+            ((src[offset].toInt() and 0xff) shl 24) or
+                ((src[offset + 1].toInt() and 0xff) shl 16) or
+                ((src[offset + 2].toInt() and 0xff) shl 8) or
+                (src[offset + 3].toInt() and 0xff)
+    }
+}

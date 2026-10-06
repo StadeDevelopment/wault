@@ -1,0 +1,222 @@
+CREATE TABLE Item (
+    id TEXT NOT NULL PRIMARY KEY,
+    payload BLOB NOT NULL,
+    revision INTEGER NOT NULL,
+    createdAt INTEGER NOT NULL,
+    updatedAt INTEGER NOT NULL,
+    updatedBy TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idxItemUpdated ON Item(updatedAt);
+
+CREATE TABLE Folder (
+    id TEXT NOT NULL PRIMARY KEY,
+    payload BLOB NOT NULL,
+    revision INTEGER NOT NULL,
+    createdAt INTEGER NOT NULL,
+    updatedAt INTEGER NOT NULL,
+    updatedBy TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE Device (
+    id TEXT NOT NULL PRIMARY KEY,
+    label TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    signingKey BLOB NOT NULL,
+    agreementKey BLOB NOT NULL,
+    sealedRootKey BLOB NOT NULL,
+    isInitiator INTEGER NOT NULL DEFAULT 0,
+    onionAddress TEXT,
+    lanAddress TEXT,
+    pairedAt INTEGER NOT NULL,
+    lastSyncedAt INTEGER NOT NULL DEFAULT 0,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    keyGeneration INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE RatchetSession (
+    deviceId TEXT NOT NULL PRIMARY KEY,
+    state BLOB NOT NULL,
+    updatedAt INTEGER NOT NULL
+);
+
+CREATE TABLE Outbox (
+    id TEXT NOT NULL PRIMARY KEY,
+    deviceId TEXT NOT NULL,
+    envelope BLOB NOT NULL,
+    queuedAt INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idxOutboxDevice ON Outbox(deviceId, queuedAt);
+
+CREATE TABLE ProcessedEnvelope (
+    envelopeId TEXT NOT NULL PRIMARY KEY,
+    deviceId TEXT NOT NULL,
+    processedAt INTEGER NOT NULL
+);
+
+CREATE INDEX idxProcessedEnvelope ON ProcessedEnvelope(processedAt);
+
+CREATE TABLE SyncCursor (
+    deviceId TEXT NOT NULL PRIMARY KEY,
+    lastPulledRevision INTEGER NOT NULL DEFAULT 0,
+    lastPushedRevision INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE KeyValue (
+    key TEXT NOT NULL PRIMARY KEY,
+    value BLOB NOT NULL
+);
+
+CREATE TABLE TransportConfig (
+    name TEXT NOT NULL PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    settings BLOB
+);
+
+selectAllItems:
+SELECT * FROM Item WHERE deleted = 0;
+
+selectAllItemsIncludingDeleted:
+SELECT * FROM Item;
+
+selectItem:
+SELECT * FROM Item WHERE id = ?;
+
+selectItemsChangedSince:
+SELECT * FROM Item WHERE updatedAt > ? ORDER BY updatedAt ASC;
+
+upsertItem:
+INSERT OR REPLACE INTO Item(id, payload, revision, createdAt, updatedAt, updatedBy, deleted)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+markItemDeleted:
+UPDATE Item SET payload = ?, revision = ?, updatedAt = ?, updatedBy = ?, deleted = 1 WHERE id = ?;
+
+purgeItem:
+DELETE FROM Item WHERE id = ?;
+
+purgeTombstonesOlderThan:
+DELETE FROM Item WHERE deleted = 1 AND updatedAt < ?;
+
+countItems:
+SELECT count(*) FROM Item WHERE deleted = 0;
+
+wipeItems:
+DELETE FROM Item;
+
+selectAllFolders:
+SELECT * FROM Folder WHERE deleted = 0;
+
+selectFolder:
+SELECT * FROM Folder WHERE id = ?;
+
+upsertFolder:
+INSERT OR REPLACE INTO Folder(id, payload, revision, createdAt, updatedAt, updatedBy, deleted)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+
+wipeFolders:
+DELETE FROM Folder;
+
+selectDevices:
+SELECT * FROM Device WHERE revoked = 0;
+
+selectAllDevices:
+SELECT * FROM Device;
+
+selectDevice:
+SELECT * FROM Device WHERE id = ?;
+
+upsertDevice:
+INSERT OR REPLACE INTO Device(id, label, platform, signingKey, agreementKey, sealedRootKey, isInitiator, onionAddress, lanAddress, pairedAt, lastSyncedAt, revoked, keyGeneration)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+markDeviceKeyGeneration:
+UPDATE Device SET keyGeneration = ? WHERE id = ?;
+
+markDeviceSynced:
+UPDATE Device SET lastSyncedAt = ? WHERE id = ?;
+
+updateDeviceAddresses:
+UPDATE Device SET onionAddress = ?, lanAddress = ? WHERE id = ?;
+
+renameDevice:
+UPDATE Device SET label = ? WHERE id = ?;
+
+revokeDevice:
+UPDATE Device SET revoked = 1 WHERE id = ?;
+
+wipeDevices:
+DELETE FROM Device;
+
+selectRatchetSession:
+SELECT * FROM RatchetSession WHERE deviceId = ?;
+
+upsertRatchetSession:
+INSERT OR REPLACE INTO RatchetSession(deviceId, state, updatedAt) VALUES (?, ?, ?);
+
+deleteRatchetSession:
+DELETE FROM RatchetSession WHERE deviceId = ?;
+
+wipeRatchetSessions:
+DELETE FROM RatchetSession;
+
+enqueueOutbox:
+INSERT OR REPLACE INTO Outbox(id, deviceId, envelope, queuedAt, attempts) VALUES (?, ?, ?, ?, ?);
+
+selectOutboxFor:
+SELECT * FROM Outbox WHERE deviceId = ? ORDER BY queuedAt ASC;
+
+dequeueOutbox:
+DELETE FROM Outbox WHERE id = ?;
+
+bumpOutboxAttempts:
+UPDATE Outbox SET attempts = attempts + 1 WHERE id = ?;
+
+wipeOutbox:
+DELETE FROM Outbox;
+
+markEnvelopeProcessed:
+INSERT OR REPLACE INTO ProcessedEnvelope(envelopeId, deviceId, processedAt) VALUES (?, ?, ?);
+
+isEnvelopeProcessed:
+SELECT count(*) FROM ProcessedEnvelope WHERE envelopeId = ?;
+
+purgeProcessedEnvelopesOlderThan:
+DELETE FROM ProcessedEnvelope WHERE processedAt < ?;
+
+wipeProcessedEnvelope:
+DELETE FROM ProcessedEnvelope;
+
+selectSyncCursor:
+SELECT * FROM SyncCursor WHERE deviceId = ?;
+
+upsertSyncCursor:
+INSERT OR REPLACE INTO SyncCursor(deviceId, lastPulledRevision, lastPushedRevision) VALUES (?, ?, ?);
+
+wipeSyncCursors:
+DELETE FROM SyncCursor;
+
+getKv:
+SELECT value FROM KeyValue WHERE key = ?;
+
+putKv:
+INSERT OR REPLACE INTO KeyValue(key, value) VALUES (?, ?);
+
+deleteKv:
+DELETE FROM KeyValue WHERE key = ?;
+
+wipeKeyValue:
+DELETE FROM KeyValue;
+
+selectTransportConfig:
+SELECT * FROM TransportConfig;
+
+upsertTransportConfig:
+INSERT OR REPLACE INTO TransportConfig(name, enabled, settings) VALUES (?, ?, ?);
+
+wipeTransportConfig:
+DELETE FROM TransportConfig;

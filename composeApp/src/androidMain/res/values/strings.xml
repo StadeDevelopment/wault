@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Wault</string>
+    <string name="autofill_service_summary">Fill logins from your Wault vault</string>
+    <string name="autofill_unlock">Unlock Wault to fill</string>
+    <string name="autofill_locked">Wault is locked</string>
+    <string name="autofill_no_username">No username</string>
+    <string name="accessibility_service_description">Lets Wault spot login fields on screen and offer a tile to fill them, including in browsers and apps that ignore the system autofill service. Wault reads the screen only to find those fields; nothing is recorded or sent anywhere.</string>
+</resources>

@@ -1,0 +1,292 @@
+package net.wault.transport.tor
+
+import net.wault.backgroundFailures
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.ServerSocket
+import java.util.concurrent.TimeUnit
+
+class EmbeddedTorManager(
+    private val appRoot: File,
+    private val virtualPort: Int = 7901,
+    private val layoutProvider: () -> TorLayout,
+    private val pidProvider: () -> Long = { currentPid() }
+) : EmbeddedTorRuntime {
+
+    private val mutex = Mutex()
+    private val status = MutableStateFlow<TorStatus>(TorStatus.Idle)
+    override val statusFlow: StateFlow<TorStatus> = status.asStateFlow()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + backgroundFailures)
+
+    @Volatile private var process: Process? = null
+    @Volatile private var ready: TorReady? = null
+    @Volatile private var controlPort: Int = 0
+    @Volatile private var socksPort: Int = 0
+    @Volatile private var controlClient: TorControlClient? = null
+    @Volatile private var cookieHexCached: String? = null
+
+    override suspend fun ensureReady(localPort: Int, bridges: TorBridgeConfig): TorReady = mutex.withLock {
+        ready?.let { current ->
+            if (localPort <= 0 || current.onionLocalPort == localPort) return@withLock current
+            val remapped = runCatching {
+                withContext(Dispatchers.IO) { remapOnion(current, localPort) }
+            }.getOrNull()
+            if (remapped != null) return@withLock remapped
+            invalidate()
+        }
+        try {
+            withContext(Dispatchers.IO) { bootInternal(localPort, bridges) }
+        } catch (error: Throwable) {
+            status.value = TorStatus.Failed(error.message ?: error::class.simpleName ?: "unknown")
+            throw error
+        }
+        ready ?: error("Tor failed to come up")
+    }
+
+    private fun bootInternal(localPort: Int, bridges: TorBridgeConfig): TorReady {
+        status.value = TorStatus.Bootstrapping(0, "preparing")
+        val layout = layoutProvider()
+        val socks = pickFreePort()
+        val ctrl = pickFreePort()
+        val localTarget = if (localPort > 0) localPort else pickFreePort()
+        val bridgeLines = if (bridges.enabled) bridges.allLines() else emptyList()
+        if (bridges.enabled && bridgeLines.isNotEmpty() && layout.obfs4Executable == null) {
+            error("Bridge support requested but the obfs4 (lyrebird) binary was not found")
+        }
+        val cookieFile = File(layout.dataDir, "control_auth_cookie")
+        runCatching { cookieFile.delete() }
+        val torrc = File(layout.dataDir, "torrc.runtime").apply {
+            writeText(buildString {
+                appendLine("DataDirectory ${layout.dataDir.absolutePath}")
+                appendLine("ClientOnly 1")
+                appendLine("AvoidDiskWrites 1")
+                appendLine("SocksPort 127.0.0.1:$socks")
+                appendLine("ControlPort 127.0.0.1:$ctrl")
+                appendLine("CookieAuthentication 1")
+                appendLine("CookieAuthFile ${cookieFile.absolutePath}")
+                appendLine("SafeLogging 1")
+                appendLine("Log notice stdout")
+                val ownerPid = pidProvider()
+                if (ownerPid > 0) appendLine("__OwningControllerProcess $ownerPid")
+                layout.geoipFile?.let { appendLine("GeoIPFile ${it.absolutePath}") }
+                layout.geoip6File?.let { appendLine("GeoIPv6File ${it.absolutePath}") }
+                if (bridgeLines.isNotEmpty()) {
+                    val obfs4Path = layout.obfs4Executable!!.absolutePath.replace('\\', '/')
+                    appendLine("ClientTransportPlugin obfs4 exec $obfs4Path")
+                    appendLine("UseBridges 1")
+                    bridgeLines.forEach { line -> appendLine("Bridge $line") }
+                }
+            })
+        }
+        controlPort = ctrl
+        socksPort = socks
+
+        val builder = ProcessBuilder(layout.executable.absolutePath, "-f", torrc.absolutePath)
+            .redirectErrorStream(true)
+            .directory(layout.torDir)
+        val proc = builder.start()
+        process = proc
+        val logFile = File(layout.dataDir, "tor.log")
+        scope.launch {
+            runCatching {
+                proc.inputStream.bufferedReader().use { reader ->
+                    logFile.bufferedWriter().use { writer ->
+                        var written = 0L
+                        reader.forEachLine { line ->
+                            runCatching {
+                                if (written > MAX_LOG_BYTES) {
+                                    writer.flush()
+                                    return@runCatching
+                                }
+                                writer.write(line)
+                                writer.newLine()
+                                writer.flush()
+                                written += line.length + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Runtime.getRuntime().addShutdownHook(Thread { runCatching { proc.destroy() } })
+
+        val cookieHex = waitForCookie(cookieFile)
+        cookieHexCached = cookieHex
+        val client = waitForControl(ctrl)
+        var keepClient = false
+        try {
+            client.authenticate(cookieHex)
+            val bootstrapped = client.waitForBootstrap({ percent, summary ->
+                status.value = TorStatus.Bootstrapping(percent, summary)
+            }, timeoutMillis = 180_000)
+            if (!bootstrapped) error("Tor bootstrap timed out")
+            client.subscribeHsDescEvents()
+            val keyStore = File(appRoot, "tor/onion.key")
+            val existingKey = keyStore.takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
+            val onion = client.addOnion(existingKey, virtualPort, localTarget)
+            if (existingKey == null && onion.privateKey != null) {
+                keyStore.parentFile?.mkdirs()
+                keyStore.writeText(onion.privateKey)
+                runCatching {
+                    val perms = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")
+                    java.nio.file.Files.setPosixFilePermissions(keyStore.toPath(), perms)
+                }
+            }
+            status.value = TorStatus.Bootstrapping(100, "publishing onion descriptor")
+            val published = runCatching {
+                client.waitForOnionPublished(onion.serviceId, timeoutMillis = 60_000)
+            }.getOrDefault(false)
+            val result = TorReady(
+                socksHost = "127.0.0.1",
+                socksPort = socks,
+                onionHostname = "${onion.serviceId}.onion",
+                onionVirtualPort = virtualPort,
+                onionLocalPort = localTarget,
+                onionPublished = published
+            )
+            ready = result
+            controlClient = client
+            keepClient = true
+            if (published) {
+                runCatching { client.unsubscribeEvents() }
+                status.value = TorStatus.Ready(result.onionHostname, published = true)
+            } else {
+                status.value = TorStatus.Ready(result.onionHostname, published = false)
+                scope.launch {
+                    val later = runCatching {
+                        client.waitForOnionPublished(onion.serviceId, timeoutMillis = 240_000)
+                    }.getOrDefault(false)
+                    runCatching { client.unsubscribeEvents() }
+                    if (later) {
+                        ready = ready?.copy(onionPublished = true)
+                        status.value = TorStatus.Ready(result.onionHostname, published = true)
+                    }
+                }
+            }
+            return result
+        } finally {
+            if (!keepClient) runCatching { client.close() }
+        }
+    }
+
+    override suspend fun republishOnion(): Boolean = mutex.withLock {
+        val current = ready ?: return@withLock false
+        val result = runCatching {
+            withContext(Dispatchers.IO) { remapOnion(current, current.onionLocalPort) }
+        }.getOrNull()
+        result != null && result.onionPublished
+    }
+
+    private fun remapOnion(current: TorReady, newLocalPort: Int): TorReady? {
+        val proc = process ?: return null
+        if (!proc.isAlive) return null
+        val ctrl = controlPort
+        val cookie = cookieHexCached
+        val hostname = current.onionHostname
+        if (ctrl <= 0 || cookie == null || hostname == null) return null
+        TorControlClient("127.0.0.1", ctrl, connectTimeoutMillis = 2_000).use { client ->
+            client.authenticate(cookie)
+            client.subscribeHsDescEvents()
+            runCatching { client.delOnion(hostname.removeSuffix(".onion")) }
+            val keyStore = File(appRoot, "tor/onion.key")
+            val existingKey = keyStore.takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }
+            val onion = client.addOnion(existingKey, virtualPort, newLocalPort)
+            if (existingKey == null && onion.privateKey != null) {
+                keyStore.parentFile?.mkdirs()
+                keyStore.writeText(onion.privateKey)
+            }
+            val published = runCatching {
+                client.waitForOnionPublished(onion.serviceId, timeoutMillis = 45_000)
+            }.getOrDefault(false)
+            runCatching { client.unsubscribeEvents() }
+            val result = current.copy(
+                onionHostname = "${onion.serviceId}.onion",
+                onionLocalPort = newLocalPort,
+                onionPublished = published
+            )
+            ready = result
+            status.value = TorStatus.Ready(result.onionHostname, published = result.onionPublished)
+            return result
+        }
+    }
+
+    override suspend fun shutdown() = mutex.withLock {
+        ready = null
+        status.value = TorStatus.Idle
+        runCatching { controlClient?.close() }
+        controlClient = null
+        process?.let { p ->
+            runCatching { p.destroy() }
+            if (!p.waitFor(5, TimeUnit.SECONDS)) {
+                runCatching { p.destroyForcibly() }
+            }
+        }
+        process = null
+    }
+
+    override fun isAlive(): Boolean = process?.isAlive ?: false
+
+    override fun invalidate() {
+        ready = null
+        runCatching { controlClient?.close() }
+        controlClient = null
+        process?.let { p ->
+            runCatching { p.destroy() }
+            runCatching {
+                if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly()
+            }
+        }
+        process = null
+        socksPort = 0
+        controlPort = 0
+        status.value = TorStatus.Idle
+    }
+
+    private fun waitForCookie(file: File): String {
+        val deadline = System.currentTimeMillis() + 20_000
+        while (System.currentTimeMillis() < deadline) {
+            if (file.exists() && file.length() == 32L) {
+                return file.readBytes().joinToString("") { "%02x".format(it) }
+            }
+            Thread.sleep(100)
+        }
+        error("Tor control cookie not produced within timeout")
+    }
+
+    private fun waitForControl(port: Int): TorControlClient {
+        val deadline = System.currentTimeMillis() + 20_000
+        var last: Throwable? = null
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                return TorControlClient("127.0.0.1", port, connectTimeoutMillis = 1_000)
+            } catch (error: Throwable) {
+                last = error
+                Thread.sleep(150)
+            }
+        }
+        throw IllegalStateException("Tor control port did not open: ${last?.message}")
+    }
+
+    private fun pickFreePort(): Int {
+        ServerSocket(0).use { return it.localPort }
+    }
+
+    private companion object {
+        const val MAX_LOG_BYTES = 2L * 1024 * 1024
+    }
+}
+
+private fun currentPid(): Long = runCatching {
+    val handleClass = Class.forName("java.lang.ProcessHandle")
+    val handle = handleClass.getMethod("current").invoke(null)
+    (handleClass.getMethod("pid").invoke(handle) as? Long) ?: 0L
+}.getOrDefault(0L)
