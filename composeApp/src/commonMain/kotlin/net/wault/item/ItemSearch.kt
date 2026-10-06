@@ -12,25 +12,49 @@ object ItemSearch {
     }
 
     fun matchingUri(items: List<VaultItem>, target: String): List<VaultItem> {
-        val targetHost = hostOf(target) ?: return emptyList()
-        val targetDomain = registrableDomain(targetHost)
+        if (target.isBlank()) return emptyList()
+        val targetHost = hostOf(target)
+        val targetDomain = targetHost?.let { registrableDomain(it) }
         return items.filter { item ->
             val login = item.content as? ItemContent.Login ?: return@filter false
             login.uris.any { candidate -> matches(candidate, target, targetHost, targetDomain) }
         }
     }
 
-    private fun matches(candidate: MatchableUri, target: String, targetHost: String, targetDomain: String): Boolean {
+    internal fun matches(
+        candidate: MatchableUri,
+        target: String,
+        targetHost: String?,
+        targetDomain: String?
+    ): Boolean {
+        if (candidate.uri.isBlank()) return false
         val candidateHost = hostOf(candidate.uri)
         return when (candidate.match) {
             UriMatch.Never -> false
             UriMatch.Exact -> candidate.uri.equals(target, ignoreCase = true)
             UriMatch.StartsWith -> target.startsWith(candidate.uri, ignoreCase = true)
-            UriMatch.Host -> candidateHost != null && candidateHost.equals(targetHost, ignoreCase = true)
-            UriMatch.Domain -> candidateHost != null &&
+            UriMatch.Regex -> matchesRegex(candidate.uri, target)
+            UriMatch.Host -> candidateHost != null && targetHost != null &&
+                candidateHost.equals(targetHost, ignoreCase = true)
+            UriMatch.Domain -> candidateHost != null && targetDomain != null &&
                 registrableDomain(candidateHost).equals(targetDomain, ignoreCase = true)
         }
     }
+
+    fun isValidRegex(pattern: String): Boolean {
+        if (pattern.isBlank() || pattern.length > MAX_REGEX_LENGTH) return false
+        return runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.isSuccess
+    }
+
+    private fun matchesRegex(pattern: String, target: String): Boolean {
+        if (pattern.length > MAX_REGEX_LENGTH) return false
+        if (target.length > MAX_REGEX_TARGET) return false
+        val compiled = runCatching { Regex(pattern, RegexOption.IGNORE_CASE) }.getOrNull() ?: return false
+        return runCatching { compiled.containsMatchIn(target) }.getOrDefault(false)
+    }
+
+    private const val MAX_REGEX_LENGTH = 512
+    private const val MAX_REGEX_TARGET = 4096
 
     private fun score(item: VaultItem, needle: String): Int? {
         val title = item.title.lowercase()

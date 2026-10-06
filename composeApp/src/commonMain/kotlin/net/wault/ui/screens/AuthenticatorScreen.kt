@@ -60,6 +60,8 @@ import androidx.compose.material3.TextButton
 import net.wault.totp.TotpImport
 import net.wault.totp.TotpImportPreview
 import net.wault.ui.components.QrScanner
+import net.wault.ui.components.isGalleryScanSupported
+import net.wault.ui.components.rememberQrGalleryPicker
 import net.wault.ui.components.isCameraScanSupported
 import net.wault.ui.i18n.LocalStrings
 import net.wault.ui.theme.WaultColors
@@ -183,6 +185,19 @@ private fun TotpImportDialog(container: AppContainer, onDismiss: () -> Unit) {
         }
     }
 
+    val pickFromGallery = rememberQrGalleryPicker(
+        onResult = { decoded ->
+            if (decoded == null) {
+                message = strings.authenticatorImageNoCode
+            } else {
+                consider(decoded)
+            }
+        },
+        onExternalFlow = { active ->
+            if (active) container.beginExternalFlow() else container.endExternalFlow()
+        }
+    )
+
     val ready = preview
 
     AlertDialog(
@@ -226,8 +241,15 @@ private fun TotpImportDialog(container: AppContainer, onDismiss: () -> Unit) {
                         )
                     }
                     Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = { scanning = false }) {
-                        Text(strings.authenticatorPaste)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { scanning = false }) {
+                            Text(strings.authenticatorPaste)
+                        }
+                        if (isGalleryScanSupported) {
+                            TextButton(onClick = pickFromGallery) {
+                                Text(strings.authenticatorPickImage)
+                            }
+                        }
                     }
                 } else {
                     OutlinedTextField(
@@ -236,9 +258,16 @@ private fun TotpImportDialog(container: AppContainer, onDismiss: () -> Unit) {
                         label = { Text(strings.authenticatorPastePlaceholder) },
                         modifier = Modifier.fillMaxWidth()
                     )
-                    if (isCameraScanSupported) {
-                        TextButton(onClick = { scanning = true }) {
-                            Text(strings.authenticatorScanQr)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isCameraScanSupported) {
+                            TextButton(onClick = { scanning = true }) {
+                                Text(strings.authenticatorScanQr)
+                            }
+                        }
+                        if (isGalleryScanSupported) {
+                            TextButton(onClick = pickFromGallery) {
+                                Text(strings.authenticatorPickImage)
+                            }
                         }
                     }
                 }

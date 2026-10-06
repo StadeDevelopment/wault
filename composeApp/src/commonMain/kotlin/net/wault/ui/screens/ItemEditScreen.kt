@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -34,7 +35,7 @@ import net.wault.AppContainer
 import net.wault.item.ItemContent
 import net.wault.item.ItemType
 import net.wault.item.TotpSecret
-import net.wault.item.MatchableUri
+import net.wault.ui.components.UriRuleEditor
 import net.wault.strength.StrengthMeter
 import net.wault.ui.components.PasswordField
 import net.wault.ui.components.StrengthBar
@@ -55,8 +56,8 @@ fun ItemEditScreen(
     var title by remember { mutableStateOf(existingContent?.title ?: "") }
     var username by remember { mutableStateOf((existingContent as? ItemContent.Login)?.username ?: "") }
     var password by remember { mutableStateOf((existingContent as? ItemContent.Login)?.password ?: "") }
-    var website by remember {
-        mutableStateOf((existingContent as? ItemContent.Login)?.uris?.firstOrNull()?.uri ?: "")
+    var uris by remember {
+        mutableStateOf((existingContent as? ItemContent.Login)?.uris ?: emptyList())
     }
     var cardholder by remember { mutableStateOf((existingContent as? ItemContent.Card)?.cardholderName ?: "") }
     var cardNumber by remember { mutableStateOf((existingContent as? ItemContent.Card)?.number ?: "") }
@@ -90,7 +91,7 @@ fun ItemEditScreen(
             title = title,
             username = username,
             password = password,
-            uris = if (website.isBlank()) emptyList() else listOf(MatchableUri(website)),
+            uris = uris.filter { it.uri.isNotBlank() },
             totp = (existingContent as? ItemContent.Login)?.totp,
             passwordHistory = (existingContent as? ItemContent.Login)?.passwordHistory ?: emptyList(),
             passwordChangedAt = (existingContent as? ItemContent.Login)?.passwordChangedAt,
@@ -205,13 +206,13 @@ fun ItemEditScreen(
                         StrengthBar(level = report.level, entropyBits = report.entropyBits)
                     }
                     Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = website,
-                        onValueChange = { website = it },
-                        label = { Text(strings.fieldWebsite) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                    Text(
+                        text = strings.uriMatchTitle,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(Modifier.height(4.dp))
+                    UriRuleEditor(uris = uris, onChange = { uris = it })
                 }
 
                 ItemType.Card -> {

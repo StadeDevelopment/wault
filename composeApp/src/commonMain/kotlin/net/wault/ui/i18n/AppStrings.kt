@@ -59,6 +59,16 @@ abstract class AppStrings {
     abstract val fieldUsername: String
     abstract val fieldPassword: String
     abstract val fieldWebsite: String
+    abstract val uriMatchDomain: String
+    abstract val uriMatchHost: String
+    abstract val uriMatchStartsWith: String
+    abstract val uriMatchExact: String
+    abstract val uriMatchRegex: String
+    abstract val uriMatchNever: String
+    abstract val uriMatchRegexInvalid: String
+    abstract val uriAdd: String
+    abstract val uriRemove: String
+    abstract val uriMatchTitle: String
     abstract val fieldNotes: String
     abstract val fieldTotp: String
     abstract val fieldCardholder: String
@@ -278,6 +288,8 @@ abstract class AppStrings {
     abstract val authenticatorImport: String
     abstract val authenticatorImportBody: String
     abstract val authenticatorScanQr: String
+    abstract val authenticatorPickImage: String
+    abstract val authenticatorImageNoCode: String
     abstract val authenticatorPaste: String
     abstract val authenticatorPastePlaceholder: String
     abstract fun authenticatorImported(count: Int): String

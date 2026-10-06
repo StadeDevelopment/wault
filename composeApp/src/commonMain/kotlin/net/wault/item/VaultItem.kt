@@ -172,6 +172,7 @@ enum class UriMatch {
     @SerialName("host") Host,
     @SerialName("startsWith") StartsWith,
     @SerialName("exact") Exact,
+    @SerialName("regex") Regex,
     @SerialName("never") Never
 }
 

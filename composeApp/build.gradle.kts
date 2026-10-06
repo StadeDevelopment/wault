@@ -3,8 +3,8 @@ import java.util.Properties
 import java.net.URI
 import java.security.MessageDigest
 
-val appVersion = "0.1.0"
-val appVersionCode = 1
+val appVersion = "26.0.0"
+val appVersionCode = 2
 
 val appVersionSource = file("src/commonMain/kotlin/net/wault/AppVersion.kt")
 val declaredAppVersion = Regex("""APP_VERSION\s*=\s*"([^"]+)"""")
@@ -14,7 +14,8 @@ check(declaredAppVersion == appVersion) {
 }
 
 val macAppVersion = appVersion.split(".").let { parts ->
-    val major = (parts.getOrNull(0)?.toIntOrNull() ?: 0) + 1
+    val declaredMajor = parts.getOrNull(0)?.toIntOrNull() ?: 0
+    val major = if (declaredMajor < 1) declaredMajor + 1 else declaredMajor
     val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
     val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
     "$major.$minor.$patch"

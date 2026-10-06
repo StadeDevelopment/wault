@@ -38,6 +38,7 @@ import net.wault.security.isBiometricEnrolled
 import net.wault.security.requestBiometricUnlock
 import net.wault.ui.LocalAppReady
 import net.wault.ui.isKeyboardVisible
+import net.wault.ui.components.ConnectedField
 import net.wault.ui.components.PasswordField
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -244,7 +245,7 @@ fun LockScreen(
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             if (recoveryMode) {
                 OutlinedTextField(
@@ -253,8 +254,8 @@ fun LockScreen(
                     label = { Text(strings.recoveryKeyPlaceholder) },
                     singleLine = true,
                     enabled = !lockedOut,
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f)
+                    shape = ConnectedField.leading,
+                    modifier = Modifier.weight(1f).height(SUBMIT_SIZE)
                 )
             } else {
                 PasswordField(
@@ -264,14 +265,15 @@ fun LockScreen(
                     enabled = !lockedOut,
                     imeAction = ImeAction.Go,
                     onImeAction = { if (!lockedOut && password.isNotEmpty()) submit() },
-                    shape = CircleShape,
-                    modifier = Modifier.weight(1f)
+                    shape = ConnectedField.leading,
+                    modifier = Modifier.weight(1f).height(SUBMIT_SIZE)
                 )
             }
 
             FilledIconButton(
                 onClick = { submit() },
                 enabled = !lockedOut && password.isNotEmpty(),
+                shape = ConnectedField.trailing,
                 modifier = Modifier.size(SUBMIT_SIZE)
             ) {
                 Icon(
@@ -301,7 +303,7 @@ fun LockScreen(
             Button(
                 onClick = { scope.launch { promptBiometric() } },
                 enabled = !lockedOut,
-                shape = CircleShape,
+                shape = ConnectedField.standalone,
                 modifier = Modifier.fillMaxWidth().height(SUBMIT_SIZE)
             ) {
                 Icon(Icons.Default.Fingerprint, contentDescription = null)
