@@ -251,7 +251,7 @@ fun LockScreen(
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it; message = null },
-                    label = { Text(strings.recoveryKeyPlaceholder) },
+                    placeholder = { Text(strings.recoveryKeyPlaceholder) },
                     singleLine = true,
                     enabled = !lockedOut,
                     shape = ConnectedField.leading,
@@ -266,6 +266,7 @@ fun LockScreen(
                     imeAction = ImeAction.Go,
                     onImeAction = { if (!lockedOut && password.isNotEmpty()) submit() },
                     shape = ConnectedField.leading,
+                    labelAsPlaceholder = true,
                     modifier = Modifier.weight(1f).height(SUBMIT_SIZE)
                 )
             }

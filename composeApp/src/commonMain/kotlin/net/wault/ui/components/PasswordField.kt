@@ -44,7 +44,8 @@ fun PasswordField(
     imeAction: ImeAction = ImeAction.Done,
     onImeAction: (() -> Unit)? = null,
     supportingText: (@Composable () -> Unit)? = null,
-    shape: androidx.compose.ui.graphics.Shape? = null
+    shape: androidx.compose.ui.graphics.Shape? = null,
+    labelAsPlaceholder: Boolean = false
 ) {
     val strings = LocalStrings.current
     var revealed by remember { mutableStateOf(false) }
@@ -53,7 +54,8 @@ fun PasswordField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text(label) },
+        label = if (labelAsPlaceholder) null else ({ Text(label) }),
+        placeholder = if (labelAsPlaceholder) ({ Text(label) }) else null,
         singleLine = true,
         enabled = enabled,
         isError = isError,

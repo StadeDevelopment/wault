@@ -1,0 +1,119 @@
+name: Desktop Packages
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS
+            tasks: ":composeApp:packageDmg"
+            patterns: "*.dmg"
+          - os: windows-latest
+            label: Windows
+            tasks: ":composeApp:packageExe"
+            patterns: "*.exe"
+          - os: ubuntu-latest
+            label: Linux
+            tasks: ":composeApp:packageDeb :composeApp:packageRpm"
+            patterns: "*.deb *.rpm"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        if: runner.os != 'Windows'
+        run: chmod +x gradlew
+
+      - name: Build installers
+        shell: bash
+        run: ./gradlew ${{ matrix.tasks }} --stacktrace
+
+      - name: Collect installers
+        id: collect
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          VERSION=""
+          case "${GITHUB_REF}" in
+            refs/tags/*)
+              VERSION="${GITHUB_REF#refs/tags/}"
+              VERSION="${VERSION#v}"
+              ;;
+          esac
+
+          found=0
+          for pattern in ${{ matrix.patterns }}; do
+            while IFS= read -r file; do
+              [ -n "$file" ] || continue
+              found=1
+              ext="${file##*.}"
+              if [ -n "$VERSION" ]; then
+                cp "$file" "dist/Wault-${VERSION}.${ext}"
+              else
+                cp "$file" "dist/$(basename "$file")"
+              fi
+            done < <(find composeApp/build/compose/binaries -name "$pattern" -type f)
+          done
+
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No installer was produced for ${{ matrix.label }}"
+            exit 1
+          fi
+
+          ls -lh dist
+          echo "has_assets=1" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wault-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach installers to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          # The release notes workflow creates the release in parallel; wait for it
+          for attempt in $(seq 1 20); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Release $TAG does not exist yet; waiting ($attempt/20)"
+            sleep 15
+          done
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::No release found for $TAG, the installers could not be attached"
+            exit 1
+          fi
+
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber

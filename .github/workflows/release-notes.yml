@@ -1,0 +1,161 @@
+name: Release Notes
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      target_tag:
+        description: 'Tag whose notes should be rebuilt (e.g. v1.0.0). Leave empty for the automatic run.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate categorized release notes
+        id: notes
+        run: |
+          set -euo pipefail
+
+          # Use the tag given on a manual run, otherwise take the pushed tag
+          # or the one carried by the release event
+          INPUT_TAG="${{ inputs.target_tag }}"
+          EVENT_TAG="${{ github.event.release.tag_name }}"
+          if [ -n "$INPUT_TAG" ]; then
+            CURRENT_TAG="$INPUT_TAG"
+          elif [ -n "$EVENT_TAG" ]; then
+            CURRENT_TAG="$EVENT_TAG"
+          else
+            CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+          fi
+
+          if [ -z "$CURRENT_TAG" ]; then
+            echo "::error::Could not work out which release to write notes for."
+            exit 1
+          fi
+
+          # A draft release has no tag yet, so fall back to the checked out commit
+          if git rev-parse -q --verify "refs/tags/${CURRENT_TAG}^{commit}" >/dev/null; then
+            END_REF="$CURRENT_TAG"
+          else
+            END_REF="HEAD"
+            echo "Tag ${CURRENT_TAG} does not exist yet; working from ${END_REF}."
+          fi
+
+          # Find the previous release by its place in history, not by its creation date
+          PREV_TAG="$(git describe --tags --abbrev=0 --exclude="$CURRENT_TAG" "$END_REF" 2>/dev/null || true)"
+
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${END_REF}"
+          else
+            RANGE="$END_REF"
+          fi
+          echo "Range: $RANGE"
+
+          WORKDIR="$(mktemp -d)"
+
+          # Fixed emission order; anything unmatched falls into "other".
+          TYPES="feat fix perf refactor docs style test build ci chore revert other"
+          for t in $TYPES; do : > "$WORKDIR/$t.md"; done
+
+          title_for() {
+            case "$1" in
+              feat) echo "Features" ;;
+              fix) echo "Bug Fixes" ;;
+              perf) echo "Performance" ;;
+              refactor) echo "Refactoring" ;;
+              docs) echo "Documentation" ;;
+              style) echo "Style" ;;
+              test) echo "Tests" ;;
+              build) echo "Build" ;;
+              ci) echo "CI" ;;
+              chore) echo "Chores" ;;
+              revert) echo "Reverts" ;;
+              other) echo "Other Changes" ;;
+            esac
+          }
+
+          commit_pattern='^([a-zA-Z]+)(\([^)]*\))?!?:[[:space:]]*(.+)$'
+
+          while IFS=$'\t' read -r hash subject; do
+            [ -z "$subject" ] && continue
+            case "$subject" in
+              "Merge "*) continue ;;
+            esac
+
+            type="other"
+            desc="$subject"
+            if [[ "$subject" =~ $commit_pattern ]]; then
+              candidate="$(echo "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+              for t in $TYPES; do
+                if [ "$t" = "$candidate" ]; then
+                  type="$candidate"
+                  desc="${BASH_REMATCH[3]}"
+                  break
+                fi
+              done
+            fi
+
+            echo "- ${desc} (${hash})" >> "$WORKDIR/$type.md"
+          done < <(git log --no-merges --pretty=tformat:'%h%x09%s' "$RANGE")
+
+          NOTES_FILE="$WORKDIR/notes.md"
+          echo "## Changes in ${CURRENT_TAG}" > "$NOTES_FILE"
+          echo "" >> "$NOTES_FILE"
+
+          any_section=0
+          for t in $TYPES; do
+            if [ -s "$WORKDIR/$t.md" ]; then
+              any_section=1
+              echo "### $(title_for "$t")" >> "$NOTES_FILE"
+              echo "" >> "$NOTES_FILE"
+              cat "$WORKDIR/$t.md" >> "$NOTES_FILE"
+              echo "" >> "$NOTES_FILE"
+            fi
+          done
+
+          if [ "$any_section" -eq 0 ]; then
+            echo "_No changes recorded._" >> "$NOTES_FILE"
+            echo "" >> "$NOTES_FILE"
+          fi
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${CURRENT_TAG}" >> "$NOTES_FILE"
+          fi
+
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          echo "current_tag=$CURRENT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.notes.outputs.current_tag }}"
+          NOTES_FILE="${{ steps.notes.outputs.notes_file }}"
+
+          # Flag pre-releases (anything carrying alpha, beta or rc)
+          EXTRA_FLAGS=""
+          if [[ "$TAG" =~ -(alpha|beta|rc) ]]; then
+            EXTRA_FLAGS="--prerelease"
+          fi
+
+          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --notes-file "$NOTES_FILE" $EXTRA_FLAGS
+          else
+            gh release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --notes-file "$NOTES_FILE" $EXTRA_FLAGS
+          fi
