@@ -8,28 +8,35 @@ import net.wault.ui.WaultApp
 
 class MainActivity : FragmentActivity() {
 
-    private lateinit var container: AppContainer
+    private var container: AppContainer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         currentActivity = this
 
-        container = WaultSession.require()
+        val initial = WaultSession.require()
+        container = initial
 
         setContent {
-            WaultApp(container)
+            WaultApp(
+                container = initial,
+                rebuild = {
+                    WaultSession.discard()
+                    runCatching { WaultSession.require() }.getOrNull()?.also { container = it }
+                }
+            )
         }
     }
 
     override fun onStart() {
         super.onStart()
-        if (::container.isInitialized) container.onEnterForeground()
+        container?.onEnterForeground()
     }
 
     override fun onStop() {
         super.onStop()
-        if (::container.isInitialized) container.onEnterBackground()
+        container?.onEnterBackground()
     }
 
     override fun onDestroy() {

@@ -23,6 +23,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -132,7 +133,8 @@ private fun homeDestination(screen: Screen): HomeDestination? = when (screen) {
 }
 
 @Composable
-fun WaultApp(container: AppContainer) {
+fun WaultApp(container: AppContainer, rebuild: () -> AppContainer? = { null }) {
+    var active by remember { mutableStateOf(container) }
     remember(container) { UiSettings.bind(container.preferences) }
 
     val locale by UiSettings.locale
@@ -148,7 +150,9 @@ fun WaultApp(container: AppContainer) {
         ) {
             Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    WaultNavHost(container)
+                    key(active) {
+                        WaultNavHost(active) { rebuild()?.let { fresh -> active = fresh } }
+                    }
 
                     if (!splashDone) {
                         SplashScreen(onFinished = { splashDone = true })
@@ -160,7 +164,7 @@ fun WaultApp(container: AppContainer) {
 }
 
 @Composable
-private fun WaultNavHost(container: AppContainer) {
+private fun WaultNavHost(container: AppContainer, onWiped: () -> Unit) {
     val density = LocalDensity.current
 
     val nav = remember {
@@ -254,6 +258,7 @@ private fun WaultNavHost(container: AppContainer) {
                                 unlocked = false
                                 container.onUnlockedByUser()
                                 nav.resetTo(Screen.Onboarding)
+                                onWiped()
                             }
                         )
 
@@ -291,6 +296,7 @@ private fun WaultNavHost(container: AppContainer) {
                                 unlocked = false
                                 container.onUnlockedByUser()
                                 nav.resetTo(Screen.Onboarding)
+                                onWiped()
                             }
                         )
 

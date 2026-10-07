@@ -5,9 +5,13 @@ import net.wault.security.Vault
 import net.wault.transport.ConnectionRegistry
 import net.wault.transport.TransportType
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+
+private const val ADDRESS_ATTEMPTS = 25
+private const val ADDRESS_POLL_MS = 200L
 
 sealed interface PairingState {
     data object Idle : PairingState
@@ -42,11 +46,21 @@ class PairingController(
             return
         }
 
+        _state.value = PairingState.Connecting
+        awaitReachableAddress()
+
+        val onion = transports.get(TransportType.TOR)?.selfAddress()
+        val lan = transports.get(TransportType.LAN)?.selfAddress()
+        if (onion == null && lan == null) {
+            _state.value = PairingState.Error("this device is not reachable yet, check Sync settings")
+            return
+        }
+
         val offer = pairing.createOffer(
             vaultId = vaultId,
             device = devices.localDevice(),
-            onionAddress = transports.get(TransportType.TOR)?.selfAddress(),
-            lanHint = transports.get(TransportType.LAN)?.selfAddress()
+            onionAddress = onion,
+            lanHint = lan
         )
         hostOffer = offer
         _state.value = PairingState.Showing(pairing.encodeOffer(offer))
@@ -68,6 +82,7 @@ class PairingController(
         }
 
         _state.value = PairingState.Connecting
+        awaitReachableAddress()
 
         val myOffer = pairing.createOffer(
             vaultId = peerOffer.vaultId,
@@ -110,6 +125,16 @@ class PairingController(
         hostOffer = null
         sync.pairingAcceptor = null
         _state.value = PairingState.Idle
+    }
+
+    private suspend fun awaitReachableAddress() {
+        runCatching { sync.start() }
+        repeat(ADDRESS_ATTEMPTS) {
+            val ready = transports.get(TransportType.LAN)?.selfAddress() != null ||
+                transports.get(TransportType.TOR)?.selfAddress() != null
+            if (ready) return
+            delay(ADDRESS_POLL_MS)
+        }
     }
 
     private suspend fun awaitConfirmation(sas: String): Boolean {

@@ -110,12 +110,15 @@ class LanTransport(
     }
 
     override fun selfAddress(): String? {
+        if (!state.value.running) return null
         val ip = allLocalIpv4().firstOrNull() ?: return null
         return "lan://$ip:$actualPort"
     }
 
-    override fun selfAddresses(): List<String> =
-        allLocalIpv4().map { "lan://$it:$actualPort" }
+    override fun selfAddresses(): List<String> {
+        if (!state.value.running) return emptyList()
+        return allLocalIpv4().map { "lan://$it:$actualPort" }
+    }
 
     override fun discoveredPeers(): List<String> = discovery.snapshot()
 

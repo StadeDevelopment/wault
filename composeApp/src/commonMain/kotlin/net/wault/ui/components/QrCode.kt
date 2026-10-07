@@ -30,7 +30,6 @@ fun QrCode(
 
     Box(
         modifier = modifier
-            .fillMaxWidth()
             .aspectRatio(1f)
             .clip(MaterialTheme.shapes.medium)
             .background(Color.White)

@@ -15,15 +15,17 @@ import net.wault.transport.platformTransports
 import net.wault.ui.WaultApp
 import kotlinx.coroutines.runBlocking
 
+private fun openContainer(vault: net.wault.security.Vault): AppContainer? = runCatching {
+    AppContainer(
+        driverFactory = platformDriverFactory(),
+        vault = vault,
+        transportFactory = { nodeId, settings -> platformTransports(nodeId, settings) }
+    )
+}.getOrNull()
+
 fun main() = application {
     val vault = createVault()
-    val container = runCatching {
-        AppContainer(
-            driverFactory = platformDriverFactory(),
-            vault = vault,
-            transportFactory = { nodeId, settings -> platformTransports(nodeId, settings) }
-        )
-    }.getOrNull()
+    val container = openContainer(vault)
 
     installShutdownLock {
         runCatching { vault.lock() }
@@ -42,7 +44,7 @@ fun main() = application {
         if (container == null) {
             MaterialTheme { Text("Wault could not open its vault directory.") }
         } else {
-            WaultApp(container)
+            WaultApp(container = container, rebuild = { openContainer(vault) })
         }
     }
 }
